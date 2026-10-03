@@ -7,9 +7,13 @@
 - Kahn 拓扑排序决定执行顺序；每个节点消费其唯一上游节点的输出「数据包」，
   数据包 = 图像 + meta（meta 携带关键点/检测框/分割区域等非图像数据，
   供检测->画框、分割->统计这类下游节点复用）。
-- 每节点执行包裹 try/except，错误记录到该节点，前端可定位失败点。
-- canonical_key() 生成与拓扑顺序无关的确定性哈希，供结果缓存使用。
+- 每个节点执行包裹 try/except，错误记录到该节点，前端可定位失败点。
+- canonical_key() 生成「与节点 id/数组顺序/布局无关、但对连线敏感」的确定性指纹：
+  以 (类型, 合并后参数) 为种子色沿输入边做颜色精化（Color Refinement），
+  每个节点的最终色编码其完整上游结构；指纹 = 全部节点最终色多重集 + 主输出节点色。
+  因此：同样节点不同连线（串行/分叉/末端改接）绝不会得到同一个缓存键。
 """
+import hashlib
 import json
 
 from . import nodes as node_registry
@@ -94,15 +98,85 @@ def topological_order(nodes):
     return ordered
 
 
+def _output_node_id(nodes, ordered):
+    """引擎实际选取的主输出节点：无下游消费者的节点（sink）中拓扑序最后一个。
+
+    与 execute() 保持同一套判定，指纹才能精确代表实际产出的那张图。
+    """
+    consumers = set()
+    for n in nodes:
+        for inp in (n.get("inputs") or []):
+            consumers.add(inp)
+    sinks = [nid for nid in ordered if nid not in consumers]
+    return sinks[-1] if sinks else (ordered[-1] if ordered else None)
+
+
+def _node_seed(node):
+    """节点自身（不含连线）的确定性种子：类型 + 合并默认值后的参数。"""
+    payload = json.dumps({"type": node.get("type"), "params": _merge_params(node)},
+                         sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(b"node\x00" + payload.encode("utf-8")).hexdigest()[:16]
+
+
+def _refine_digest(seed, parent_digests):
+    """把本节点种子与（已精化的）上游颜色迭代成下一轮颜色。"""
+    h = hashlib.sha256()
+    h.update(b"ref\x00")
+    h.update(seed.encode("utf-8"))
+    h.update(b"\x00")
+    # 多输入：排序保证与 inputs 书写顺序无关；单输入时等价于「上游链」颜色
+    for d in sorted(parent_digests):
+        h.update(d.encode("utf-8"))
+        h.update(b"\x00")
+    return h.hexdigest()[:16]
+
+
 def canonical_key(nodes):
-    """生成与布局/命名无关的确定性流水线指纹（供缓存命中判定）。"""
-    ordered, _ = _topo(nodes)
-    by_id = {n["id"]: n for n in nodes}
-    seq = []
-    for nid in ordered:
-        n = by_id[nid]
-        seq.append({"type": n["type"], "params": _merge_params(n)})
-    return json.dumps(seq, sort_keys=True, separators=(",", ":"))
+    """生成流水线指纹（供缓存命中判定）。
+
+    与节点 id、节点在数组中的顺序、画布坐标均无关；但对「连线关系」敏感：
+    沿输入边做颜色精化后，每个节点的颜色是其完整上游子结构的编码，
+    再加上主输出节点的颜色。串行 / 同节点分叉 / 末端改接 / 末端下再接节点，
+    只要连线不同，指纹必不同；而同一条流水线（含保存、历史恢复、批量复用）
+    即便节点 id 重新分配也稳定命中。
+
+    返回带版本标记的 JSON 字符串，便于将来继续演进指纹方案而不污染旧缓存。
+    """
+    ordered, leftover = _topo(nodes)
+    by_id = {n.get("id"): n for n in nodes if n.get("id") is not None}
+
+    # 种子色：只看节点自身（类型 + 参数）
+    seeds = {nid: _node_seed(by_id[nid]) for nid in ordered}
+    for n in nodes:  # 成环节点不在 topo 序里，也给一个种子，避免下面悬空引用
+        nid = n.get("id")
+        if nid is not None and nid not in seeds:
+            seeds[nid] = _node_seed(n)
+
+    # 颜色精化：按拓扑序逐轮把「上游颜色」并入本节点颜色。
+    # 对单输入 DAG 一轮 topo 传播即等价于不动点（每节点恰好在其全部上游之后处理）。
+    colors = dict(seeds)
+    for _ in range(max(1, len(seeds))):
+        changed = False
+        for nid in ordered:
+            node = by_id[nid]
+            parents = [pid for pid in (node.get("inputs") or []) if pid in seeds]
+            parent_colors = [colors.get(p, seeds.get(p, "")) for p in parents]
+            new_color = _refine_digest(seeds[nid], parent_colors)
+            if new_color != colors[nid]:
+                colors[nid] = new_color
+                changed = True
+        if not changed:
+            break
+
+    structure = sorted(colors[nid] for nid in ordered)
+    output_nid = _output_node_id(nodes, ordered) if not leftover else None
+    fingerprint = {
+        "v": 2,
+        "nodes": structure,                                   # 全图结构多重集
+        "output": colors[output_nid] if output_nid else None,  # 主输出的结构色
+        "cyclic": bool(leftover),
+    }
+    return json.dumps(fingerprint, separators=(",", ":"), ensure_ascii=False)
 
 
 def execute(image, nodes, source_meta=None):
@@ -141,12 +215,7 @@ def execute(image, nodes, source_meta=None):
                                  "error": f"{type(exc).__name__}: {exc}"})
 
     # 主输出 = 无下游消费者的节点中拓扑序最后一个；无节点则输出源图
-    consumers = set()
-    for n in nodes:
-        for inp in (n.get("inputs") or []):
-            consumers.add(inp)
-    sinks = [nid for nid in ordered if nid not in consumers]
-    output_node_id = sinks[-1] if sinks else (ordered[-1] if ordered else None)
+    output_node_id = _output_node_id(nodes, ordered)
 
     if output_node_id:
         out = packets[output_node_id]

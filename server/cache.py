@@ -84,8 +84,12 @@ class ResultCache:
         return entries
 
     # ------------------------------------------------------------------ 写
-    def put(self, key, image, meta=None):
-        """保存结果图并登记缓存，返回 result_id。"""
+    def put(self, key, image, meta=None, provenance=None):
+        """保存结果图并登记缓存，返回 result_id。
+
+        provenance 记录「这张结果图最初是由哪条流水线 / 哪个历史运行产出」，
+        供后续缓存命中时向用户说明复用来源（不参与缓存键计算）。
+        """
         result_id = uuid.uuid4().hex
         file_name = result_id + ".png"
         dest = os.path.join(config.RESULTS_DIR, file_name)
@@ -104,6 +108,7 @@ class ResultCache:
             "width": rgb.size[0],
             "height": rgb.size[1],
             "meta": meta or {},
+            "provenance": provenance or {},
             "created_at": now_iso(),
             "last_access": time.time(),
         }
@@ -144,6 +149,19 @@ class ResultCache:
             removed += 1
         self.store.write(entries)
         return removed
+
+    def update_provenance(self, result_id, provenance):
+        """回填/更新某个结果的来源信息（首次产出后补上历史 id）。"""
+        def _upd(doc):
+            doc = dict(doc)
+            for k, e in list(doc.items()):
+                if e.get("result_id") == result_id:
+                    e = dict(e)
+                    e["provenance"] = provenance
+                    doc[k] = e
+                    break
+            return doc
+        self.store.update(_upd)
 
     def delete_result(self, result_id):
         """按 result_id 删除结果（供历史删除联动）。"""

@@ -88,6 +88,7 @@ def _result_view(entry):
         "size_bytes": entry.get("size_bytes"),
         "created_at": entry.get("created_at"),
         "meta": entry.get("meta", {}),
+        "provenance": entry.get("provenance", {}),
         "file_url": f"/api/results/{entry.get('result_id')}/file",
     }
 
@@ -345,6 +346,8 @@ def run_pipeline():
         "result_id": res["result_id"],
         "cache_hit": res["cache_hit"],
         "history_id": res["history_id"],
+        # 缓存命中时：这张结果图复用自哪条流水线/哪次首次运行
+        "reused_from": res.get("reused_from"),
         "file_url": f"/api/results/{res['result_id']}/file",
         "meta": entry.get("meta", {}),
         "node_results": (res["exec_result"] or {}).get("node_results", []),

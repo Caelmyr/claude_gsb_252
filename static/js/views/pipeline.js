@@ -224,9 +224,10 @@ window.Views.pipeline = (function () {
     preview.innerHTML = `<div class="loading">运行中…</div>`;
     try {
       const r = await Api.post("/api/run", { image_id: imageId, nodes: nodes.map(strip), pipeline_name: "临时流水线" });
+      const caption = cacheCaption(r);
       preview.innerHTML = `
         <img src="${r.file_url}?t=${Date.now()}">
-        <div class="caption">${r.cache_hit ? "缓存命中" : "已计算"} · ${(r.meta && r.meta.count != null) ? "对象 " + r.meta.count : ""}</div>`;
+        <div class="caption">${caption} · ${(r.meta && r.meta.count != null) ? "对象 " + r.meta.count : ""}</div>`;
       // 标记失败节点
       const failed = (r.node_results || []).filter((n) => !n.ok);
       if (failed.length) {
@@ -240,6 +241,16 @@ window.Views.pipeline = (function () {
   }
 
   function strip(n) { return { id: n.id, type: n.type, params: n.params, inputs: n.inputs, x: n.x, y: n.y }; }
+
+  // 缓存说明：命中时必须讲清「复用的是哪条流水线、何时首次产出」，
+  // 避免同节点不同连线时误以为是本次计算结果。
+  function cacheCaption(r) {
+    if (!r.cache_hit) return "本次新计算";
+    const src = r.reused_from || {};
+    const name = src.pipeline_name || "未知流水线";
+    const when = src.produced_at ? "（" + C.fmtDate(src.produced_at) + " 首次产出）" : "";
+    return `缓存命中 · 复用自流水线「${C.esc(name)}」${when}`;
+  }
 
   function savePipeline() {
     const m = C.modal(`<div class="field"><label>流水线名称</label><input type="text" id="sp-name" value="我的流水线"></div>

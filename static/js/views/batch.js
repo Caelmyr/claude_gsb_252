@@ -87,6 +87,8 @@ window.Views.batch = (function () {
       const running = j.status === "queued" || j.status === "running";
       const badge = { done: "green", partial: "amber", cancelled: "amber", running: "", queued: "" }[j.status] || "red";
       const errCount = Object.values(j.results || {}).filter((r) => r.status === "error").length;
+      const hits = Object.values(j.results || {}).filter((r) => r.cache_hit && r.status === "ok");
+      const reusedNames = Array.from(new Set(hits.map((r) => r.reused_from && r.reused_from.pipeline_name).filter(Boolean)));
       return `<div class="panel" style="margin-bottom:10px">
         <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
           <span class="badge ${badge}">${statusText(j.status)}</span>
@@ -96,7 +98,7 @@ window.Views.batch = (function () {
           ${running ? `<button class="btn btn-sm btn-danger" data-cancel="${j.id}">取消</button>` : ""}
         </div>
         <div class="progress"><div class="progress-bar" style="width:${pct}%"></div></div>
-        <div class="keypoint-stats" style="margin-top:6px">${C.fmtDate(j.created_at)}</div>
+        <div class="keypoint-stats" style="margin-top:6px">${C.fmtDate(j.created_at)}${hits.length ? ` · <span title="结果与本次连线精确匹配后才复用">${hits.length} 张缓存命中${reusedNames.length ? "（复用自：" + C.esc(reusedNames.join("、")) + "）" : ""}</span>` : ""}</div>
       </div>`;
     }).join("");
     box.querySelectorAll("[data-cancel]").forEach((b) => b.onclick = async () => {

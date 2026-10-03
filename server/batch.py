@@ -21,6 +21,20 @@ from .cache import make_key
 from .storage import JsonStore, now_iso
 
 
+def _provenance(pipeline_id, pipeline_name, history_id=None):
+    """结果图「出生证明」：首次算出它的流水线身份。
+
+    缓存命中时原样回传，用于向用户说明复用的是哪条流水线的结果。
+    与缓存键无关——同一条流水线无论跑多少次、被谁复用，来源始终指向首次产出。
+    """
+    return {
+        "pipeline_id": pipeline_id,
+        "pipeline_name": pipeline_name or "临时流水线",
+        "history_id": history_id,
+        "produced_at": now_iso(),
+    }
+
+
 def load_working_image(image_store, image_id):
     """载入图像并降采样到工作分辨率（大图内存管理入口）。"""
     rec = image_store.get(image_id)
@@ -36,22 +50,27 @@ def process_image(image_store, cache, history, image_id, nodes,
                   pipeline_id=None, pipeline_name=None):
     """对单张图执行流水线（带缓存），并记录历史。
 
-    返回 {result_id, cache_hit, error, exec_result, history_id}。
+    返回 {result_id, cache_hit, error, exec_result, history_id, reused_from}。
+    reused_from 仅在缓存命中时给出：这张结果图首次产出时的流水线身份。
     """
     t0 = time.time()
     try:
         _, work, rec = load_working_image(image_store, image_id)
     except Exception as exc:  # noqa: BLE001
         return {"result_id": None, "cache_hit": False,
-                "error": f"载入图像失败: {exc}", "exec_result": None, "history_id": None}
+                "error": f"载入图像失败: {exc}", "exec_result": None,
+                "history_id": None, "reused_from": None}
 
+    # 缓存键含完整连线指纹：同样节点、不同连线绝不串用结果
     key = make_key(rec["hash"], pipeline_engine.canonical_key(nodes))
     cached = cache.get(key)
     if cached:
+        source = (cache.get_entry(cached) or {}).get("provenance") or {}
         entry = _record_history(history, image_store, image_id, nodes, pipeline_id,
-                                pipeline_name, cached, True, None, None, t0)
+                                pipeline_name, cached, True, None, None, t0,
+                                reused_from=source)
         return {"result_id": cached, "cache_hit": True, "error": None,
-                "exec_result": None, "history_id": entry["id"]}
+                "exec_result": None, "history_id": entry["id"], "reused_from": source}
 
     exec_result = pipeline_engine.execute(work, nodes)
     if exec_result.get("error"):
@@ -59,18 +78,25 @@ def process_image(image_store, cache, history, image_id, nodes,
                                 pipeline_name, None, False, exec_result["error"],
                                 exec_result.get("node_results"), t0)
         return {"result_id": None, "cache_hit": False, "error": exec_result["error"],
-                "exec_result": exec_result, "history_id": entry["id"]}
+                "exec_result": exec_result, "history_id": entry["id"],
+                "reused_from": None}
 
-    result_id = cache.put(key, exec_result["image"], exec_result["meta"])
+    provenance = _provenance(pipeline_id, pipeline_name)
+    result_id = cache.put(key, exec_result["image"], exec_result["meta"],
+                          provenance=provenance)
     entry = _record_history(history, image_store, image_id, nodes, pipeline_id,
                             pipeline_name, result_id, False, None,
                             exec_result.get("node_results"), t0)
+    # 回填首次产出对应的历史 id，让复用来源能精确定位到「哪一次运行」
+    provenance["history_id"] = entry["id"]
+    cache.update_provenance(result_id, provenance)
     return {"result_id": result_id, "cache_hit": False, "error": None,
-            "exec_result": exec_result, "history_id": entry["id"]}
+            "exec_result": exec_result, "history_id": entry["id"],
+            "reused_from": None}
 
 
 def _record_history(history, image_store, image_id, nodes, pipeline_id, pipeline_name,
-                    result_id, cache_hit, error, node_results, t0):
+                    result_id, cache_hit, error, node_results, t0, reused_from=None):
     rec = image_store.get(image_id)
     return history.add({
         "image_id": image_id,
@@ -81,6 +107,8 @@ def _record_history(history, image_store, image_id, nodes, pipeline_id, pipeline
         "node_count": len(nodes),
         "result_id": result_id,
         "cache_hit": cache_hit,
+        # 缓存命中时，说明复用的是哪条流水线/哪次运行的结果
+        "reused_from": reused_from,
         "status": "error" if error else "ok",
         "error": error,
         "node_results": node_results,
@@ -157,6 +185,7 @@ class BatchManager:
                 j["results"][image_id] = {
                     "result_id": res["result_id"], "cache_hit": res["cache_hit"],
                     "status": "error" if res["error"] else "ok", "error": res["error"],
+                    "reused_from": res.get("reused_from"),
                 }
                 j["done"] = len(j["results"])
                 return j
