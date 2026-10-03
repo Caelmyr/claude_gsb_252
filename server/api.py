@@ -344,6 +344,7 @@ def run_pipeline():
     return jsonify({
         "result_id": res["result_id"],
         "cache_hit": res["cache_hit"],
+        "cache_source": res.get("cache_source"),
         "history_id": res["history_id"],
         "file_url": f"/api/results/{res['result_id']}/file",
         "meta": entry.get("meta", {}),

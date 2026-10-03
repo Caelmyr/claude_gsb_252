@@ -226,7 +226,7 @@ window.Views.pipeline = (function () {
       const r = await Api.post("/api/run", { image_id: imageId, nodes: nodes.map(strip), pipeline_name: "临时流水线" });
       preview.innerHTML = `
         <img src="${r.file_url}?t=${Date.now()}">
-        <div class="caption">${r.cache_hit ? "缓存命中" : "已计算"} · ${(r.meta && r.meta.count != null) ? "对象 " + r.meta.count : ""}</div>`;
+        <div class="caption">${cacheCaption(r)} · ${(r.meta && r.meta.count != null) ? "对象 " + r.meta.count : ""}</div>`;
       // 标记失败节点
       const failed = (r.node_results || []).filter((n) => !n.ok);
       if (failed.length) {
@@ -240,6 +240,18 @@ window.Views.pipeline = (function () {
   }
 
   function strip(n) { return { id: n.id, type: n.type, params: n.params, inputs: n.inputs, x: n.x, y: n.y }; }
+
+  /* 运行结果说明：缓存命中时标明复用的是哪条流水线的结果。 */
+  function cacheCaption(r) {
+    if (!r.cache_hit) return "已计算";
+    const s = r.cache_source;
+    if (!s || (!s.pipeline_name && s.node_count == null)) return "缓存命中";
+    let text = `缓存命中 · 复用「${C.esc(s.pipeline_name || "未命名流水线")}」`;
+    if (s.node_count != null) text += `（${s.node_count} 节点）`;
+    text += " 的结果";
+    if (s.created_at) text += `，生成于 ${C.fmtDate(s.created_at)}`;
+    return text;
+  }
 
   function savePipeline() {
     const m = C.modal(`<div class="field"><label>流水线名称</label><input type="text" id="sp-name" value="我的流水线"></div>

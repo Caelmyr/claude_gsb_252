@@ -84,8 +84,12 @@ class ResultCache:
         return entries
 
     # ------------------------------------------------------------------ 写
-    def put(self, key, image, meta=None):
-        """保存结果图并登记缓存，返回 result_id。"""
+    def put(self, key, image, meta=None, origin=None):
+        """保存结果图并登记缓存，返回 result_id。
+
+        origin 记录该结果的来源（流水线名/id、节点数等），缓存命中时
+        随条目返回，让前端能说清「这次复用的是哪条流水线的结果」。
+        """
         result_id = uuid.uuid4().hex
         file_name = result_id + ".png"
         dest = os.path.join(config.RESULTS_DIR, file_name)
@@ -104,6 +108,7 @@ class ResultCache:
             "width": rgb.size[0],
             "height": rgb.size[1],
             "meta": meta or {},
+            "origin": origin or {},
             "created_at": now_iso(),
             "last_access": time.time(),
         }

@@ -8,7 +8,8 @@
   数据包 = 图像 + meta（meta 携带关键点/检测框/分割区域等非图像数据，
   供检测->画框、分割->统计这类下游节点复用）。
 - 每节点执行包裹 try/except，错误记录到该节点，前端可定位失败点。
-- canonical_key() 生成与拓扑顺序无关的确定性哈希，供结果缓存使用。
+- canonical_key() 生成与节点 id/布局无关、但对连线关系敏感的确定性指纹，
+  供结果缓存使用：只有连线结构完全同构的流水线才共享缓存。
 """
 import json
 
@@ -94,15 +95,42 @@ def topological_order(nodes):
     return ordered
 
 
-def canonical_key(nodes):
-    """生成与布局/命名无关的确定性流水线指纹（供缓存命中判定）。"""
-    ordered, _ = _topo(nodes)
+def _node_signatures(nodes):
+    """为每个节点生成包含上游连线的递归结构签名：{node_id: signature}。
+
+    签名 = [类型, 补全后的参数, 各输入节点的签名（按 inputs 顺序递归展开）]。
+    签名引用的是上游节点的签名而非其 id，因此与节点命名/画布布局无关；
+    但连线方式不同（串链 vs 分叉 vs 换接）必然产生不同的签名。
+    所有注册节点 max_inputs <= 1，上游展开为一条链，签名完整刻画
+    「从源节点到本节点的整条路径」。
+    """
     by_id = {n["id"]: n for n in nodes}
-    seq = []
+    ordered, leftover = _topo(nodes)
+    sigs = {}
     for nid in ordered:
         n = by_id[nid]
-        seq.append({"type": n["type"], "params": _merge_params(n)})
-    return json.dumps(seq, sort_keys=True, separators=(",", ":"))
+        inputs = [sigs[i] for i in (n.get("inputs") or []) if i in sigs]
+        sigs[nid] = [n["type"], _merge_params(n), inputs]
+    # 环/悬空引用只出现在非法流水线中（execute 会拒绝执行，不会写入缓存），
+    # 这里仍给出确定性签名，保证 canonical_key 对任意输入都稳定返回。
+    for nid in leftover:
+        n = by_id[nid]
+        sigs[nid] = [n["type"], _merge_params(n),
+                     {"unresolved": sorted(n.get("inputs") or [])}]
+    return sigs
+
+
+def canonical_key(nodes):
+    """生成与布局/命名无关、但对连线关系敏感的确定性流水线指纹（供缓存命中判定）。
+
+    指纹 = 所有节点结构签名的多重集合（先逐节点序列化再排序，
+    避免 dict 不可比较，同时保证与节点排列顺序无关）。
+    """
+    sigs = _node_signatures(nodes)
+    parts = sorted(
+        json.dumps(s, sort_keys=True, separators=(",", ":")) for s in sigs.values()
+    )
+    return json.dumps(parts, separators=(",", ":"))
 
 
 def execute(image, nodes, source_meta=None):

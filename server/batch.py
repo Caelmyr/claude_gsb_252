@@ -36,41 +36,60 @@ def process_image(image_store, cache, history, image_id, nodes,
                   pipeline_id=None, pipeline_name=None):
     """对单张图执行流水线（带缓存），并记录历史。
 
-    返回 {result_id, cache_hit, error, exec_result, history_id}。
+    返回 {result_id, cache_hit, error, exec_result, history_id, cache_source}。
+    cache_source 仅命中缓存时非空，描述被复用结果的来源流水线。
     """
     t0 = time.time()
     try:
         _, work, rec = load_working_image(image_store, image_id)
     except Exception as exc:  # noqa: BLE001
-        return {"result_id": None, "cache_hit": False,
+        return {"result_id": None, "cache_hit": False, "cache_source": None,
                 "error": f"载入图像失败: {exc}", "exec_result": None, "history_id": None}
 
     key = make_key(rec["hash"], pipeline_engine.canonical_key(nodes))
     cached = cache.get(key)
     if cached:
+        cache_source = _cache_source(cache.get_entry(cached) or {})
         entry = _record_history(history, image_store, image_id, nodes, pipeline_id,
-                                pipeline_name, cached, True, None, None, t0)
+                                pipeline_name, cached, True, None, None, t0,
+                                cache_source=cache_source)
         return {"result_id": cached, "cache_hit": True, "error": None,
-                "exec_result": None, "history_id": entry["id"]}
+                "exec_result": None, "history_id": entry["id"],
+                "cache_source": cache_source}
 
     exec_result = pipeline_engine.execute(work, nodes)
     if exec_result.get("error"):
         entry = _record_history(history, image_store, image_id, nodes, pipeline_id,
                                 pipeline_name, None, False, exec_result["error"],
                                 exec_result.get("node_results"), t0)
-        return {"result_id": None, "cache_hit": False, "error": exec_result["error"],
+        return {"result_id": None, "cache_hit": False, "cache_source": None,
+                "error": exec_result["error"],
                 "exec_result": exec_result, "history_id": entry["id"]}
 
-    result_id = cache.put(key, exec_result["image"], exec_result["meta"])
+    origin = {"pipeline_id": pipeline_id, "pipeline_name": pipeline_name,
+              "node_count": len(nodes)}
+    result_id = cache.put(key, exec_result["image"], exec_result["meta"], origin=origin)
     entry = _record_history(history, image_store, image_id, nodes, pipeline_id,
                             pipeline_name, result_id, False, None,
                             exec_result.get("node_results"), t0)
-    return {"result_id": result_id, "cache_hit": False, "error": None,
-            "exec_result": exec_result, "history_id": entry["id"]}
+    return {"result_id": result_id, "cache_hit": False, "cache_source": None,
+            "error": None, "exec_result": exec_result, "history_id": entry["id"]}
+
+
+def _cache_source(entry):
+    """从缓存条目提取「结果来源」，供前端说明本次复用的是哪条流水线的结果。"""
+    origin = entry.get("origin") or {}
+    return {
+        "pipeline_id": origin.get("pipeline_id"),
+        "pipeline_name": origin.get("pipeline_name"),
+        "node_count": origin.get("node_count"),
+        "result_id": entry.get("result_id"),
+        "created_at": entry.get("created_at"),
+    }
 
 
 def _record_history(history, image_store, image_id, nodes, pipeline_id, pipeline_name,
-                    result_id, cache_hit, error, node_results, t0):
+                    result_id, cache_hit, error, node_results, t0, cache_source=None):
     rec = image_store.get(image_id)
     return history.add({
         "image_id": image_id,
@@ -81,6 +100,7 @@ def _record_history(history, image_store, image_id, nodes, pipeline_id, pipeline
         "node_count": len(nodes),
         "result_id": result_id,
         "cache_hit": cache_hit,
+        "cache_source": cache_source,
         "status": "error" if error else "ok",
         "error": error,
         "node_results": node_results,
@@ -156,6 +176,7 @@ class BatchManager:
             def _done(j):
                 j["results"][image_id] = {
                     "result_id": res["result_id"], "cache_hit": res["cache_hit"],
+                    "cache_source": res.get("cache_source"),
                     "status": "error" if res["error"] else "ok", "error": res["error"],
                 }
                 j["done"] = len(j["results"])

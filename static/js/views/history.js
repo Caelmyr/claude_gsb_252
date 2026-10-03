@@ -37,7 +37,7 @@ window.Views.history = (function () {
         <td>${C.esc(e.pipeline_name || "临时")}</td>
         <td>${e.node_count}</td>
         <td>${C.fmtMs(e.duration_ms)}</td>
-        <td><span class="badge ${e.status === "ok" ? "green" : "red"}">${e.status === "ok" ? "成功" : "失败"}</span>${e.cache_hit ? ' <span class="badge">缓存</span>' : ""}</td>
+        <td><span class="badge ${e.status === "ok" ? "green" : "red"}">${e.status === "ok" ? "成功" : "失败"}</span>${e.cache_hit ? ` <span class="badge" title="复用「${C.esc((e.cache_source && e.cache_source.pipeline_name) || "未知流水线")}」的结果">缓存</span>` : ""}</td>
         <td><button class="btn btn-sm" data-id="${e.id}">查看</button></td>
       </tr>`).join("") + `</tbody></table>`;
 
@@ -56,12 +56,14 @@ window.Views.history = (function () {
     const box = el.querySelector("#hi-detail");
     const nodes = (e.pipeline_snapshot && e.pipeline_snapshot.nodes) || [];
     const nodeResults = e.node_results || [];
+    const src = e.cache_hit && e.cache_source ? e.cache_source : null;
     box.innerHTML = `
       <div class="keypoint-stats" style="line-height:1.9">
         <div><span class="dim">状态</span> <span class="badge ${e.status === "ok" ? "green" : "red"}">${e.status === "ok" ? "成功" : "失败"}</span></div>
         <div><span class="dim">图像</span> ${C.esc(e.image_name || "-")}</div>
         <div><span class="dim">流水线</span> ${C.esc(e.pipeline_name || "临时")}（${e.node_count} 节点）</div>
         <div><span class="dim">耗时</span> ${C.fmtMs(e.duration_ms)} · <span class="dim">缓存</span> ${e.cache_hit ? "命中" : "计算"}</div>
+        ${src ? `<div><span class="dim">复用自</span> 「${C.esc(src.pipeline_name || "未命名流水线")}」${src.node_count != null ? `（${src.node_count} 节点）` : ""} 的结果${src.created_at ? `，生成于 ${C.fmtDate(src.created_at)}` : ""}</div>` : ""}
         ${e.error ? `<div><span class="dim">错误</span> ${C.esc(e.error)}</div>` : ""}
         <div><span class="dim">版本快照</span> ${nodes.map((n) => `<span class="badge">${C.esc(n.type)}</span>`).join(" ") || "无节点"}</div>
         ${nodeResults.length ? `<div><span class="dim">节点执行</span> ${nodeResults.map((n) => `${n.ok ? "✓" : "✗"}${n.node_id}`).join(" ")}</div>` : ""}
